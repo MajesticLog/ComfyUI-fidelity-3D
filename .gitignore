@@ -1,0 +1,31 @@
+# Models and weights
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.bin
+# Renders, videos, heavy outputs
+renders/
+rendus/
+output/
+reports/
+rapports/
+*.mp4
+*.exr
+*.hdr
+*.blend
+*.blend1
+*.glb
+*.fbx
+*.zip
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Private notes (never published)
+PROJET.md
+POSITIONNEMENT.md
+*entretien*.md
+*.part

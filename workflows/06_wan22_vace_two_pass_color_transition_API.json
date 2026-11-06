@@ -1,0 +1,616 @@
+{
+ "1": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "wan2.2_fun_vace_high_noise_14B_fp8_scaled.safetensors",
+   "weight_dtype": "default"
+  },
+  "_meta": {
+   "title": "unet_hi"
+  }
+ },
+ "2": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "wan2.2_fun_vace_low_noise_14B_fp8_scaled.safetensors",
+   "weight_dtype": "default"
+  },
+  "_meta": {
+   "title": "unet_lo"
+  }
+ },
+ "3": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_name": "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+   "strength_model": 1.0
+  },
+  "_meta": {
+   "title": "lora_hi"
+  }
+ },
+ "4": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "2",
+    0
+   ],
+   "lora_name": "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+   "strength_model": 1.0
+  },
+  "_meta": {
+   "title": "lora_lo"
+  }
+ },
+ "5": {
+  "class_type": "ModelSamplingSD3",
+  "inputs": {
+   "model": [
+    "3",
+    0
+   ],
+   "shift": 5.0
+  },
+  "_meta": {
+   "title": "ms_hi"
+  }
+ },
+ "6": {
+  "class_type": "ModelSamplingSD3",
+  "inputs": {
+   "model": [
+    "4",
+    0
+   ],
+   "shift": 5.0
+  },
+  "_meta": {
+   "title": "ms_lo"
+  }
+ },
+ "7": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+   "type": "wan",
+   "device": "default"
+  },
+  "_meta": {
+   "title": "clip"
+  }
+ },
+ "8": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "7",
+    0
+   ],
+   "text": "blurry, distorted handbag, deformed handles, extra straps, melting, text, watermark, low quality, flicker, camera shake, people"
+  },
+  "_meta": {
+   "title": "neg"
+  }
+ },
+ "9": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "wan_2.1_vae.safetensors"
+  },
+  "_meta": {
+   "title": "vae"
+  }
+ },
+ "10": {
+  "class_type": "LoadVideo",
+  "inputs": {
+   "file": "drop_depth.mp4"
+  },
+  "_meta": {
+   "title": "depth_vid"
+  }
+ },
+ "11": {
+  "class_type": "GetVideoComponents",
+  "inputs": {
+   "video": [
+    "10",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "depth_img"
+  }
+ },
+ "12": {
+  "class_type": "LoadVideo",
+  "inputs": {
+   "file": "drop_mask_after_contact.mp4"
+  },
+  "_meta": {
+   "title": "mask_vid"
+  }
+ },
+ "13": {
+  "class_type": "GetVideoComponents",
+  "inputs": {
+   "video": [
+    "12",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "mask_img"
+  }
+ },
+ "14": {
+  "class_type": "ImageToMask",
+  "inputs": {
+   "image": [
+    "13",
+    0
+   ],
+   "channel": "red"
+  },
+  "_meta": {
+   "title": "mask_raw"
+  }
+ },
+ "15": {
+  "class_type": "ThresholdMask",
+  "inputs": {
+   "mask": [
+    "14",
+    0
+   ],
+   "value": 0.5
+  },
+  "_meta": {
+   "title": "mask"
+  }
+ },
+ "16": {
+  "class_type": "EmptyImage",
+  "inputs": {
+   "width": 640,
+   "height": 640,
+   "batch_size": 49,
+   "color": 8355711
+  },
+  "_meta": {
+   "title": "grey"
+  }
+ },
+ "17": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "7",
+    0
+   ],
+   "text": "A small structured leather handbag in pastel blush pink with polished gold hardware falls slowly onto a pastel blue round table on a sunny Parisian café terrace. Slow motion, photorealistic luxury commercial, static camera, warm late afternoon light, shallow depth of field."
+  },
+  "_meta": {
+   "title": "p1_pos"
+  }
+ },
+ "18": {
+  "class_type": "WanVaceToVideo",
+  "inputs": {
+   "positive": [
+    "17",
+    0
+   ],
+   "negative": [
+    "8",
+    0
+   ],
+   "vae": [
+    "9",
+    0
+   ],
+   "width": 640,
+   "height": 640,
+   "length": 49,
+   "batch_size": 1,
+   "strength": 1.0,
+   "control_video": [
+    "11",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "p1_vace"
+  }
+ },
+ "19": {
+  "class_type": "KSamplerAdvanced",
+  "inputs": {
+   "cfg": 1.0,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "steps": 4,
+   "positive": [
+    "18",
+    0
+   ],
+   "negative": [
+    "18",
+    1
+   ],
+   "model": [
+    "5",
+    0
+   ],
+   "add_noise": "enable",
+   "noise_seed": 1312,
+   "latent_image": [
+    "18",
+    2
+   ],
+   "start_at_step": 0,
+   "end_at_step": 2,
+   "return_with_leftover_noise": "enable"
+  },
+  "_meta": {
+   "title": "p1_ks1"
+  }
+ },
+ "20": {
+  "class_type": "KSamplerAdvanced",
+  "inputs": {
+   "cfg": 1.0,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "steps": 4,
+   "positive": [
+    "18",
+    0
+   ],
+   "negative": [
+    "18",
+    1
+   ],
+   "model": [
+    "6",
+    0
+   ],
+   "add_noise": "disable",
+   "noise_seed": 1312,
+   "latent_image": [
+    "19",
+    0
+   ],
+   "start_at_step": 2,
+   "end_at_step": 10000,
+   "return_with_leftover_noise": "disable"
+  },
+  "_meta": {
+   "title": "p1_ks2"
+  }
+ },
+ "21": {
+  "class_type": "TrimVideoLatent",
+  "inputs": {
+   "samples": [
+    "20",
+    0
+   ],
+   "trim_amount": [
+    "18",
+    3
+   ]
+  },
+  "_meta": {
+   "title": "p1_trim"
+  }
+ },
+ "22": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "samples": [
+    "21",
+    0
+   ],
+   "vae": [
+    "9",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "p1_dec"
+  }
+ },
+ "23": {
+  "class_type": "CreateVideo",
+  "inputs": {
+   "images": [
+    "22",
+    0
+   ],
+   "fps": 16
+  },
+  "_meta": {
+   "title": "p1_cv"
+  }
+ },
+ "24": {
+  "class_type": "SaveVideo",
+  "inputs": {
+   "video": [
+    "23",
+    0
+   ],
+   "filename_prefix": "video/vace_pass1_pink",
+   "format": "mp4",
+   "codec": "h264"
+  },
+  "_meta": {
+   "title": "p1_sv"
+  }
+ },
+ "25": {
+  "class_type": "ImageCompositeMasked",
+  "inputs": {
+   "destination": [
+    "22",
+    0
+   ],
+   "source": [
+    "16",
+    0
+   ],
+   "x": 0,
+   "y": 0,
+   "resize_source": false,
+   "mask": [
+    "15",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "p2_input"
+  }
+ },
+ "26": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "drop_ref_yellow.png"
+  },
+  "_meta": {
+   "title": "ref_yellow"
+  }
+ },
+ "27": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "7",
+    0
+   ],
+   "text": "A small structured lemon yellow leather handbag with polished silver hardware resting on a pastel blue round table on a sunny Parisian café terrace. Photorealistic luxury commercial, static camera, warm late afternoon light, shallow depth of field."
+  },
+  "_meta": {
+   "title": "p2_pos"
+  }
+ },
+ "28": {
+  "class_type": "WanVaceToVideo",
+  "inputs": {
+   "positive": [
+    "27",
+    0
+   ],
+   "negative": [
+    "8",
+    0
+   ],
+   "vae": [
+    "9",
+    0
+   ],
+   "width": 640,
+   "height": 640,
+   "length": 49,
+   "batch_size": 1,
+   "strength": 1.0,
+   "control_video": [
+    "25",
+    0
+   ],
+   "control_masks": [
+    "15",
+    0
+   ],
+   "reference_image": [
+    "26",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "p2_vace"
+  }
+ },
+ "29": {
+  "class_type": "KSamplerAdvanced",
+  "inputs": {
+   "cfg": 1.0,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "steps": 4,
+   "positive": [
+    "28",
+    0
+   ],
+   "negative": [
+    "28",
+    1
+   ],
+   "model": [
+    "5",
+    0
+   ],
+   "add_noise": "enable",
+   "noise_seed": 1312,
+   "latent_image": [
+    "28",
+    2
+   ],
+   "start_at_step": 0,
+   "end_at_step": 2,
+   "return_with_leftover_noise": "enable"
+  },
+  "_meta": {
+   "title": "p2_ks1"
+  }
+ },
+ "30": {
+  "class_type": "KSamplerAdvanced",
+  "inputs": {
+   "cfg": 1.0,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "steps": 4,
+   "positive": [
+    "28",
+    0
+   ],
+   "negative": [
+    "28",
+    1
+   ],
+   "model": [
+    "6",
+    0
+   ],
+   "add_noise": "disable",
+   "noise_seed": 1312,
+   "latent_image": [
+    "29",
+    0
+   ],
+   "start_at_step": 2,
+   "end_at_step": 10000,
+   "return_with_leftover_noise": "disable"
+  },
+  "_meta": {
+   "title": "p2_ks2"
+  }
+ },
+ "31": {
+  "class_type": "TrimVideoLatent",
+  "inputs": {
+   "samples": [
+    "30",
+    0
+   ],
+   "trim_amount": [
+    "28",
+    3
+   ]
+  },
+  "_meta": {
+   "title": "p2_trim"
+  }
+ },
+ "32": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "samples": [
+    "31",
+    0
+   ],
+   "vae": [
+    "9",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "p2_dec"
+  }
+ },
+ "33": {
+  "class_type": "CreateVideo",
+  "inputs": {
+   "images": [
+    "32",
+    0
+   ],
+   "fps": 16
+  },
+  "_meta": {
+   "title": "p2_cv"
+  }
+ },
+ "34": {
+  "class_type": "SaveVideo",
+  "inputs": {
+   "video": [
+    "33",
+    0
+   ],
+   "filename_prefix": "video/vace_pass2_yellow_raw",
+   "format": "mp4",
+   "codec": "h264"
+  },
+  "_meta": {
+   "title": "p2_sv"
+  }
+ },
+ "35": {
+  "class_type": "ImageCompositeMasked",
+  "inputs": {
+   "destination": [
+    "22",
+    0
+   ],
+   "source": [
+    "32",
+    0
+   ],
+   "x": 0,
+   "y": 0,
+   "resize_source": false,
+   "mask": [
+    "15",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "final"
+  }
+ },
+ "36": {
+  "class_type": "CreateVideo",
+  "inputs": {
+   "images": [
+    "35",
+    0
+   ],
+   "fps": 16
+  },
+  "_meta": {
+   "title": "fin_cv"
+  }
+ },
+ "37": {
+  "class_type": "SaveVideo",
+  "inputs": {
+   "video": [
+    "36",
+    0
+   ],
+   "filename_prefix": "video/vace_final_transition",
+   "format": "mp4",
+   "codec": "h264"
+  },
+  "_meta": {
+   "title": "fin_sv"
+  }
+ }
+}
