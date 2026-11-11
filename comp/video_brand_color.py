@@ -78,6 +78,12 @@ def main():
     p.add_argument("--residual", type=float, default=0.5, help="share of the AI's fine colour variations kept")
     p.add_argument("--margin", type=int, default=6, help="px of overflow tolerated around the 3D mask")
     p.add_argument("--tolerance", type=float, default=14.0, help="colour distance (a*b*) to accept a margin pixel")
+    p.add_argument("--swatch", action="store_true",
+                   help="targets = brand swatch colours (anim.json) instead of the 3D renders, chroma scaled by the AI's lightness")
+    p.add_argument("--chroma-min", type=float, default=0.45, help="minimum saturation kept in shadows (swatch mode)")
+    p.add_argument("--contact", type=int, default=10, help="contact frame (start of the transition)")
+    p.add_argument("--transition-end", type=int, default=0,
+                   help="frame by which the whole bag must have changed colour (0 = disabled)")
     p.add_argument("--out", required=True)
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -95,7 +101,16 @@ def main():
             "target_before": ab_median(render_lab(a.renders, a.before), m_before),
             "target_after": ab_median(render_lab(a.renders, a.after), m_after),
         }
-        print(mat, {k: np.round(v, 1).tolist() for k, v in anchors[mat].items()})
+        if a.swatch:
+            # The 3D renders (studio light + AgX) are desaturated: they gave dull targets
+            # (pink → mauve, lemon → olive). The brand swatch is the reference for colour.
+            with open(os.path.join(a.renders, "anim.json"), encoding="utf-8") as fj:
+                swatch = json.load(fj)["colors"]
+            for phase, key in (("before", "target_before"), ("after", "target_after")):
+                lab_sw = rgb2lab(np.array([[swatch[phase][mat]]], dtype=np.float64))[0, 0]
+                anchors[mat][key] = lab_sw[1:]
+                anchors[mat]["L_" + phase] = float(lab_sw[0])
+        print(mat, {k: np.round(v, 1).tolist() if hasattr(v, "tolist") else round(v, 1) for k, v in anchors[mat].items()})
 
     outputs, measures = [], []
     for k in range(n):
@@ -124,8 +139,20 @@ def main():
             ab = lab[..., 1:][m]
             t = np.clip(((ab - r["ai_before"]) @ seg) / max(seg @ seg, 1e-6), 0, 1)[:, None]
             ai_base = r["ai_before"] + t * seg
+            # Temporal floor: the AI sometimes leaves "late" areas (the shaded side still pink). Its
+            # progress is kept during the transition, but by the end of the transition the whole bag
+            # must have switched: t >= ramp(frame).
+            if a.transition_end > a.contact:
+                ramp = np.clip((k - a.contact) / (a.transition_end - a.contact), 0, 1)
+                t = np.maximum(t, ramp)
             target = r["target_before"] + t * (r["target_after"] - r["target_before"])
-            new = target + a.residual * (ab - ai_base)
+            if "L_before" in r:
+                # Swatch mode: saturation follows the AI's lightness. A shaded area keeps the brand's
+                # hue, but with less chroma, like a real lit surface.
+                L = lab[..., 0][m][:, None]
+                L_ref = r["L_before"] + t * (r["L_after"] - r["L_before"])
+                target = target * np.clip(L / L_ref, a.chroma_min, 1.15)
+            new =target + a.residual * (ab - ai_base)
             # 1 px feather at the mask edge
             feather = cv2.GaussianBlur(m.astype(np.float32), (0, 0), 0.8)[m][:, None]
             lab[..., 1:][m] = new * feather + ab * (1 - feather)
@@ -142,7 +169,7 @@ def main():
     write_video(os.path.join(a.out, "corrected.mp4"), outputs)
     write_video(os.path.join(a.out, "side_by_side.mp4"), [np.hstack([b, c]) for b, c in zip(frames, outputs)])
     with open(os.path.join(a.out, "measures.json"), "w", encoding="utf-8") as f:
-        json.dump({"anchors": {m: {k: v.tolist() for k, v in r.items()} for m, r in anchors.items()},
+        json.dump({"anchors": {m: {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in r.items()} for m, r in anchors.items()},
                    "frames": measures}, f, indent=1, ensure_ascii=False)
     # Contact sheet: frames 8, 10, 12, 14, 20, 40; top = raw AI, bottom = corrected.
     ks = [k for k in (8, 10, 12, 14, 20, 40) if k < n]

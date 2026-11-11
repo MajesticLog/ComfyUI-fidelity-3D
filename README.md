@@ -69,6 +69,50 @@ Generative AI makes beautiful images, but it **quietly changes the product**: em
 
 *Top: AI output (salmon pink, mustard yellow). Bottom: brand colours restored, same animated transition. Metal hardware is not solved yet (ΔE 8.6).*
 
+### Measuring and correcting the deformation
+
+Colour can be fixed afterwards. **Shape is harder**: is the strap 3 px wider than the real one, is a handle swelling? Because Blender drives the video, every frame has an **exact 3D reference of the same pose, seen by the same camera**. No pose estimation needed: any shape difference is a deformation invented by the AI.
+
+**1. Measure: a deformation map, frame by frame** (`comp/deformation_map.py`). Each 3D edge point looks for the matching edge in the AI frame, along its normal. Three kinds of edges are covered: the **silhouette** (object mask), **occlusion edges** where a part passes in front of another (jumps in the depth pass), and **creases** (orientation jumps in the normal pass). A global affine fit ("placement") is removed first, so that only the local deformation remains.
+
+![Deformation map](docs/images/deformation_map.jpg)
+
+*Frame 30 of the original-mask video. The 3D contour is coloured by the offset found in the AI frame (blue = 0, red = 6 px); white lines join a 3D edge to the AI edge when they are more than 3 px apart. Circles = silhouette, squares = occlusion edges, diamonds = creases, grey = not trusted. The inside of the bag shows the secondary measurement (optical flow on corners and patterns).*
+
+**2. Know what a number means: calibration, then the lighting trap.** Fake videos made from the renders (hue, contrast, background, noise and MP4 compression changed, geometry intact) give the noise floor. Known "bumps" of 0.5 to 4 px give the sensitivity. One finding changed the method: **light alone moves edges**. The same undeformed bag, rendered under two different suns, "moves" its rounded creases by **5 to 8 px**. So:
+
+- `animate_drop.py --passes lights` renders 11 **basis lights** (10 suns + 1 sky) as linear 16-bit PNG. Light adds up, so any lighting is a weighted sum of these renders: thousands of relightings, without Blender.
+- `comp/edge_confidence.py` derives a **per-point confidence map**: is this edge visible under most lightings (visibility)? How far does light alone move it (tolerance, p90)? Only the offset **beyond** the tolerance counts as deformation. Tolerances are learnt on 12 random lightings and tested on 4 unseen ones (cross-validation).
+
+**3. Prevent: an exact mask for the repaint pass.** The deformation map showed that pass 2 (the colour change) made the edges worse. Inside the grey hole, VACE only knows the bag's shape from the mask contour, and the original mask was 4 px too wide. With the **exact silhouette** (`comp/pass2_masks.py --margin 0`, same pass 1, two seeds per mask):
+
+| Reliable edge points more than 1 px beyond their tolerance (frames 10–48) | Pass 1 only | Mask +4 px | **Exact mask** |
+|---|---|---|---|
+| All edges | 23 % | 30–35 % | **17–19 %** |
+| Handles, charm, strap | 17 % | 43–48 % | 21–24 % |
+| Stitching | 6 % | 47–53 % | 3–9 % |
+
+**About half as many deformed edges**, and even fewer than pass 1 alone: a sharp mask contour is a **shape constraint**, not only an area to repaint.
+
+**4. A negative result, kept:** accumulating the measurement over the 35 still frames (`comp/temporal_accumulation.py`, `comp/temporal_noise.py`) changes nothing. The AI's shape is wrong but **stable**: frame-to-frame jitter of an edge point is only 0.02–0.07 px. The limit is a systematic bias (the AI's unknown lighting), not random noise.
+
+**5. Correct: pull the edges back onto the 3D** (`comp/edge_correction.py`). A warp field is built from the reliable silhouette and occlusion points (normalized convolution, σ = 4 px; zero far from the edges, so the set does not move). Two safeguards: **neighbour consistency** (an AI deformation is smooth along an edge, so isolated outliers are dropped) and **anti-fold** (the Jacobian determinant of the warp stays > 0.5). Without them, a single wrong match tore the image (17 px displacement under the strap buckle).
+
+Validation on fake videos with **known** bumps, under unseen lightings. The error is computed from the true displacement field, independently of the edge detector:
+
+| Mean error (px) | Before | **Certain mode** (default) | Full mode |
+|---|---|---|---|
+| Silhouette, ≈ 3 px bump | 2.97 | **1.44** | 0.93 |
+| Silhouette, ≈ 2 px bump | 1.94 | **1.05** | 0.69 |
+| Internal edges, ≈ 3 px bump | 2.99 | **2.30** | 2.15 |
+| Healthy edges damaged (> 1 px) | 0 % | **0 %** | 7 % ❌ |
+
+"Certain" mode only corrects what light cannot explain: it fixes about half of a silhouette deformation and **never damages a correct edge**. "Full" mode corrects more but "fixes" lighting effects, so it is rejected. On the real videos, the share of reliable edges more than 1 px off drops from **19 % to 8 %** (exact mask) and from **34 % to 13 %** (original mask), with a maximum displacement of 5 px.
+
+![Edge correction](docs/images/edge_correction.jpg)
+
+*Frame 30 of the original-mask video, strap (×2), 3D contour in magenta. The right end of the strap, too wide in the AI output, comes back onto the 3D contour. Right: amplitude of the correction field (black = 0, yellow = 4 px). Small ripples remain on the lower edge of the strap (see limits).*
+
 ---
 
 ## Repository
@@ -76,14 +120,21 @@ Generative AI makes beautiful images, but it **quietly changes the product**: em
 | Path | What it does |
 |---|---|
 | `blender/export_passes.py` | Renders beauty (RGBA), depth, camera-space normals and **one mask per material** for each camera. Emission-material swap (robust to Blender 5's compositor changes). Options: `--passes depth_table` (invisible round table in the depth only, disparity encoding), `--sun` / `--bounce` (relight the beauty to match a generated set). |
-| `blender/animate_drop.py` | Drop animation with colour switch at contact: per-frame simple render, depth (fixed range), beauty, masks (object / metal / leather). |
+| `blender/animate_drop.py` | Drop animation with colour switch at contact: per-frame simple render, depth (fixed range), beauty, masks (object / metal / leather). Optional passes: `normal` (creases), `ids` (one value per model part, no anti-aliasing), `lights` (11 linear basis lights). Options `--sun`, `--view Standard` for sunlit, non-desaturated reference images. |
 | `blender/flatten_simple.py`, `blender/inspect_model.py` | Helpers. |
 | `qa/fidelity_qa.py` | **Per-zone fidelity QA**: SSIM after light equalization, edge F1 (Canny, ±2 px), ΔE2000 with reference lightness. HTML report, heatmap, edge map. |
 | `qa/make_test_case.py` | Builds a known-good and a known-bad image to self-test the QA. |
 | `comp/frequency_reinjection.py` | Keeps the AI's low frequencies (light) and re-injects the render's high frequencies (texture), multiplicatively in linear light; optional chroma restore in Lab. |
 | `comp/video_qa.py` | Per-frame QA + re-injection for video, with affine re-alignment (ECC) and temporal stability. |
-| `comp/video_brand_color.py` | Enforces exact brand colours in a video while keeping the AI's transition timing. |
+| `comp/video_brand_color.py` | Enforces exact brand colours in a video while keeping the AI's transition timing. `--swatch`: targets from the brand swatch (`anim.json`) with chroma following the AI's lightness; `--transition-end`: the whole bag must have switched by that frame. |
 | `comp/vace_api.py`, `comp/vace_two_pass.py` | Build / queue Wan 2.2 Fun VACE graphs through the ComfyUI API. |
+| `comp/deformation_map.py` | **Per-frame deformation map**: silhouette, occlusion edges and creases vs the 3D render, after removing the global placement. `measure` (CSV, curves, annotated video) and `calibrate` (noise floor + sensitivity on fake videos). |
+| `comp/edge_confidence.py` | Per-point **confidence map** from the basis lights: visibility and lighting tolerance of each edge point, cross-validated on unseen lightings. |
+| `comp/lighting_noise_test.py` | Measures the offsets caused by lighting alone (same undeformed bag, other suns). |
+| `comp/temporal_accumulation.py`, `comp/temporal_noise.py` | Temporal median over the still frames, and frame-to-frame jitter (negative result: the AI's deformation is stable). |
+| `comp/edge_correction.py` | **Warps the AI video so its edges land back on the 3D edges**. `validate` (known bumps, true-field error) and `correct`. |
+| `comp/pass2_masks.py`, `comp/vace_pass2_mask.py` | Pass 2 temporal mask with a chosen margin, and a graph that re-runs pass 2 alone on a saved pass 1. |
+| `comp/compare_measurements.py` | Side-by-side table of several deformation measurements, per model part. |
 | `workflows/` | ComfyUI workflows (UI format, plus one API-format graph). |
 
 ### Models used (not included)
@@ -121,6 +172,22 @@ python qa/fidelity_qa.py --ref renders/cam05_beauty.png --gen fixed.png --out re
 
 **Video:** `blender/animate_drop.py` renders the per-frame passes; encode `depth/` and the after-contact mask as MP4 (`drop_depth.mp4`, `drop_mask_after_contact.mp4`) into ComfyUI's input folder with a yellow reference image (`drop_ref_yellow.png`); run `workflows/06_*`; then `comp/video_brand_color.py` and `comp/video_qa.py`.
 
+**Shape (deformation map and correction):**
+
+```bash
+# Passes needed: depth, masks, normals, part ids, basis lights
+blender -b --factory-startup --python blender/animate_drop.py -- --import bag.glb --out renders/drop --hdri studio.hdr \
+    --passes simple,depth,beauty,masks,normal,ids,lights
+
+# Exact-silhouette mask for pass 2 (instead of +4 px)
+python comp/pass2_masks.py --refs renders/drop --margin 0 --out <ComfyUI>/input/drop_mask_after_contact_m0.mp4
+
+# Confidence map (an AI video provides a realistic set), then measure and correct
+python comp/edge_confidence.py --refs renders/drop --background-video ai.mp4 --out renders/confidence
+python comp/deformation_map.py measure --refs renders/drop --video ai.mp4 --confidence renders/confidence --out reports/deformation
+python comp/edge_correction.py correct --refs renders/drop --video ai.mp4 --confidence renders/confidence --out reports/correction
+```
+
 ---
 
 ## Known limits
@@ -129,10 +196,12 @@ python qa/fidelity_qa.py --ref renders/cam05_beauty.png --gen fixed.png --out re
 - **Thresholds are starting values** (SSIM ≥ 0.80, F1 ≥ 0.75, ΔE ≤ 5; < 2 for a brand colour). They should be calibrated with a house, on its own approved and rejected references.
 - **1024 px only**, one product, one material family (embroidered raffia). Not yet tested: 4K, polished metal, glass, patent leather.
 - **Video is a first result**, not a finished pipeline.
+- **Shape correction is partial by design.** "Certain" mode leaves about the lighting tolerance (≈ 0.7 px on the silhouette, ≈ 2 px on internal edges). Creases are measured but not corrected (their image position depends on light), and a slide *along* an edge is invisible to the method. The warp only moves existing pixels: a detail the AI erased does not come back. Small ripples can appear where neighbouring points get different corrections.
+- **Re-measuring after correction is partly circular** (same detector). The proof is the validation on known bumps; the real-video figures only show that the correction applies.
 
 ## Next
 
-- Estimate the generated set's lighting and **re-render the product in Blender** with it — exact by construction, no correction needed.
+- Estimate the generated set's lighting and **re-render the product in Blender** with it — exact by construction, no correction needed. Knowing the AI's light would also shrink the per-point tolerances, which are now the main limit of the deformation measurement.
 - Organic transition masks ("ink in water") driven from the impact point.
 - A blind, independent evaluation (perceptual metrics, OCR of lettering, vision-language checks) to break the circularity.
 - A per-zone pass/fail report an art director can sign off.

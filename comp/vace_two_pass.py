@@ -29,7 +29,7 @@ import argparse
 import json
 import urllib.request
 
-PROMPT_1 = ("A small structured leather handbag in pastel blush pink with polished gold hardware falls slowly onto a "
+PROMPT_1 = ("A small structured leather handbag in blush pink with polished gold hardware falls slowly onto a "
             "pastel blue round table on a sunny Parisian café terrace. Slow motion, photorealistic luxury "
             "commercial, static camera, warm late afternoon light, shallow depth of field.")
 PROMPT_2 = ("A small structured lemon yellow leather handbag with polished silver hardware resting on a pastel "
@@ -92,7 +92,12 @@ def build_graph(a):
         "mask": {"class_type": "ThresholdMask", "inputs": {"mask": ["mask_raw", 0], "value": 0.5}},
         "grey": {"class_type": "EmptyImage", "inputs": {"width": a.size, "height": a.size, "batch_size": a.frames, "color": GREY}},
     }
-    d1 = add_pass(g, "p1_", a.prompt1, ["depth_img", 0], None, a)
+    # Optional pass 1 reference image (e.g. the pink bag rendered from 3D in the target light).
+    ref1 = None
+    if a.reference1:
+        g["ref_pink"] = {"class_type": "LoadImage", "inputs": {"image": a.reference1}}
+        ref1 = ["ref_pink", 0]
+    d1 = add_pass(g, "p1_", a.prompt1, ["depth_img", 0], None, a, ref1)
     save(g, "p1", [d1, 0], "video/vace_pass1_pink")
     # Pass 2: pass 1 with a grey hole inside the mask
     g["p2_input"] = {"class_type": "ImageCompositeMasked", "inputs": {"destination": [d1, 0], "source": ["grey", 0],
@@ -134,6 +139,7 @@ def main():
     p.add_argument("--mask", default="drop_mask_after_contact.mp4")
     p.add_argument("--prompt1", default=PROMPT_1)
     p.add_argument("--prompt2", default=PROMPT_2)
+    p.add_argument("--reference1", default="", help="pass 1 reference image (optional)")
     p.add_argument("--reference2", default="drop_ref_yellow.png", help="pass 2 reference image ('' for none)")
     a = p.parse_args()
     g = build_graph(a)
