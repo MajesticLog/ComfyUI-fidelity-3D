@@ -69,7 +69,7 @@ Generative AI makes beautiful images, but it **quietly changes the product**: em
 
 *Top: AI output (salmon pink, mustard yellow). Bottom: brand colours restored, same animated transition. Metal hardware is not solved yet (ΔE 8.6).*
 
-### Measuring and correcting the deformation
+### Measuring the deformation
 
 Colour can be fixed afterwards. **Shape is harder**: is the strap 3 px wider than the real one, is a handle swelling? Because Blender drives the video, every frame has an **exact 3D reference of the same pose, seen by the same camera**. No pose estimation needed: any shape difference is a deformation invented by the AI.
 
@@ -88,30 +88,38 @@ Colour can be fixed afterwards. **Shape is harder**: is the strap 3 px wider tha
 
 | Reliable edge points more than 1 px beyond their tolerance (frames 10–48) | Pass 1 only | Mask +4 px | **Exact mask** |
 |---|---|---|---|
-| All edges | 23 % | 30–35 % | **17–19 %** |
-| Handles, charm, strap | 17 % | 43–48 % | 21–24 % |
-| Stitching | 6 % | 47–53 % | 3–9 % |
+| All edges | 22 % | 32–38 % | **16–18 %** |
+| Handles, charm, strap | 16 % | 46–47 % | 18–19 % |
+| Stitching | 7 % | 76–82 % | 3–9 % |
+
+*(Two seeds per mask; the original +4 px mask is shown here on the controlled pass-2 re-runs.)*
 
 **About half as many deformed edges**, and even fewer than pass 1 alone: a sharp mask contour is a **shape constraint**, not only an area to repaint.
 
 **4. A negative result, kept:** accumulating the measurement over the 35 still frames (`comp/temporal_accumulation.py`, `comp/temporal_noise.py`) changes nothing. The AI's shape is wrong but **stable**: frame-to-frame jitter of an edge point is only 0.02–0.07 px. The limit is a systematic bias (the AI's unknown lighting), not random noise.
 
-**5. Correct: pull the edges back onto the 3D** (`comp/edge_correction.py`). A warp field is built from the reliable silhouette and occlusion points (normalized convolution, σ = 4 px; zero far from the edges, so the set does not move). Two safeguards: **neighbour consistency** (an AI deformation is smooth along an edge, so isolated outliers are dropped) and **anti-fold** (the Jacobian determinant of the warp stays > 0.5). Without them, a single wrong match tore the image (17 px displacement under the strap buckle).
+**5. Correcting it: tried, then abandoned** (`comp/edge_correction.py`, kept for reference). The idea was to warp the AI frame so that its edges land back on the 3D edges. A displacement field is built from the reliable silhouette and occlusion points (normalized convolution, σ = 4 px), only the offset beyond each point's lighting tolerance is corrected, and two safeguards apply: neighbour consistency and anti-fold.
 
-Validation on fake videos with **known** bumps, under unseen lightings. The error is computed from the true displacement field, independently of the edge detector:
+**On paper it worked.** On fake videos with known bumps, under unseen lightings, a 3 px silhouette bump dropped to 1.26 px and no healthy edge was damaged. Re-measured with the same detector, the real videos looked fixed too.
 
-| Mean error (px) | Before | **Certain mode** (default) | Full mode |
-|---|---|---|---|
-| Silhouette, ≈ 3 px bump | 2.97 | **1.44** | 0.93 |
-| Silhouette, ≈ 2 px bump | 1.94 | **1.05** | 0.69 |
-| Internal edges, ≈ 3 px bump | 2.99 | **2.30** | 2.15 |
-| Healthy edges damaged (> 1 px) | 0 % | **0 %** | 7 % ❌ |
+**On screen it did not.** Seen at full size, the corrected frames look like a Photoshop *Liquify* brush, and that is exactly what a warp is:
 
-"Certain" mode only corrects what light cannot explain: it fixes about half of a silhouette deformation and **never damages a correct edge**. "Full" mode corrects more but "fixes" lighting effects, so it is rejected. On the real videos, the share of reliable edges more than 1 px off drops from **19 % to 8 %** (exact mask) and from **34 % to 13 %** (original mask), with a maximum displacement of 5 px.
+![Edge correction, abandoned](docs/images/edge_correction.jpg)
 
-![Edge correction](docs/images/edge_correction.jpg)
+*Frame 40, 3D contour in magenta. Top: even where the AI is almost right (exact mask), the strap tab is dented where leather passes over leather. Bottom: where the AI is far off (handle drawn 5 to 10 px too thick), the correction is partial and lumpy, with a double edge.*
 
-*Frame 30 of the original-mask video, strap (×2), 3D contour in magenta. The right end of the strap, too wide in the AI output, comes back onto the 3D contour. Right: amplitude of the correction field (black = 0, yellow = 4 px). Small ripples remain on the lower edge of the strap (see limits).*
+Why it fails:
+- **A warp is a set of brush strokes.** The field only exists at edge points. Neighbours push by different amounts, or not at all (inside their tolerance, or not measurable: 24–29 % of the points). The field changes within a few pixels, and the leather's highlights bend with it.
+- **The least reliable measurements sit where errors show most.** On internal edges (leather in front of leather), the lighting tolerance is about 2 px and the inside/outside colour test is meaningless. A 1 px mistake there is in the middle of the product.
+- **Large deformations cannot be pushed back.** A warp moves existing pixels. It cannot redraw a handle that the AI drew 10 px too thick.
+- **The re-measurement was circular.** "16 % → 4 % of edges off" only showed that the correction obeyed the detector. An independent colour-based measurement (yellow-leather mask vs 3D mask) gave a real gain of only **12 % (exact mask) and 19 % (original mask)**.
+
+Three bugs were found and fixed on the way, and each fix exposed the next problem:
+1. **The detector latched onto the cast shadow.** Its inside/outside test was only *relative*: cyan table vs navy shadow passed, because cyan is "closer" to yellow. Fixed with an absolute condition in `deformation_map.py` (the inside of an edge must look like the bag).
+2. **The correction aimed at the wrong target.** The deformation map removes a global affine "placement" so that it measures shape independently of position. But the affine absorbs part of the real deformations (handles) and creates fictitious offsets on correct edges, which the warp then "fixed" into bumps. Fixed by aiming at the 3D contour itself: the video is generated from the render, so the right position is known.
+3. **Internal edges.** Not fixable by tuning: see above.
+
+**Conclusion.** Shape is **measured** after generation (`deformation_map.py`) and **prevented** before it (exact pass-2 mask: half as many deformed edges). It is not repaired with a warp. A real repair would mean re-compositing the rendered part, as in demo A, or regenerating.
 
 ---
 
@@ -132,7 +140,7 @@ Validation on fake videos with **known** bumps, under unseen lightings. The erro
 | `comp/edge_confidence.py` | Per-point **confidence map** from the basis lights: visibility and lighting tolerance of each edge point, cross-validated on unseen lightings. |
 | `comp/lighting_noise_test.py` | Measures the offsets caused by lighting alone (same undeformed bag, other suns). |
 | `comp/temporal_accumulation.py`, `comp/temporal_noise.py` | Temporal median over the still frames, and frame-to-frame jitter (negative result: the AI's deformation is stable). |
-| `comp/edge_correction.py` | **Warps the AI video so its edges land back on the 3D edges**. `validate` (known bumps, true-field error) and `correct`. |
+| `comp/edge_correction.py` | *Abandoned experiment, kept for reference.* Warps the AI video so its edges land back on the 3D edges. `validate` (known bumps, true-field error) and `correct`. See step 5 for why it was abandoned. |
 | `comp/pass2_masks.py`, `comp/vace_pass2_mask.py` | Pass 2 temporal mask with a chosen margin, and a graph that re-runs pass 2 alone on a saved pass 1. |
 | `comp/compare_measurements.py` | Side-by-side table of several deformation measurements, per model part. |
 | `workflows/` | ComfyUI workflows (UI format, plus one API-format graph). |
@@ -172,7 +180,7 @@ python qa/fidelity_qa.py --ref renders/cam05_beauty.png --gen fixed.png --out re
 
 **Video:** `blender/animate_drop.py` renders the per-frame passes; encode `depth/` and the after-contact mask as MP4 (`drop_depth.mp4`, `drop_mask_after_contact.mp4`) into ComfyUI's input folder with a yellow reference image (`drop_ref_yellow.png`); run `workflows/06_*`; then `comp/video_brand_color.py` and `comp/video_qa.py`.
 
-**Shape (deformation map and correction):**
+**Shape (deformation map):**
 
 ```bash
 # Passes needed: depth, masks, normals, part ids, basis lights
@@ -182,10 +190,9 @@ blender -b --factory-startup --python blender/animate_drop.py -- --import bag.gl
 # Exact-silhouette mask for pass 2 (instead of +4 px)
 python comp/pass2_masks.py --refs renders/drop --margin 0 --out <ComfyUI>/input/drop_mask_after_contact_m0.mp4
 
-# Confidence map (an AI video provides a realistic set), then measure and correct
+# Confidence map (an AI video provides a realistic set), then measure
 python comp/edge_confidence.py --refs renders/drop --background-video ai.mp4 --out renders/confidence
 python comp/deformation_map.py measure --refs renders/drop --video ai.mp4 --confidence renders/confidence --out reports/deformation
-python comp/edge_correction.py correct --refs renders/drop --video ai.mp4 --confidence renders/confidence --out reports/correction
 ```
 
 ---
@@ -196,8 +203,7 @@ python comp/edge_correction.py correct --refs renders/drop --video ai.mp4 --conf
 - **Thresholds are starting values** (SSIM ≥ 0.80, F1 ≥ 0.75, ΔE ≤ 5; < 2 for a brand colour). They should be calibrated with a house, on its own approved and rejected references.
 - **1024 px only**, one product, one material family (embroidered raffia). Not yet tested: 4K, polished metal, glass, patent leather.
 - **Video is a first result**, not a finished pipeline.
-- **Shape correction is partial by design.** "Certain" mode leaves about the lighting tolerance (≈ 0.7 px on the silhouette, ≈ 2 px on internal edges). Creases are measured but not corrected (their image position depends on light), and a slide *along* an edge is invisible to the method. The warp only moves existing pixels: a detail the AI erased does not come back. Small ripples can appear where neighbouring points get different corrections.
-- **Re-measuring after correction is partly circular** (same detector). The proof is the validation on known bumps; the real-video figures only show that the correction applies.
+- **Shape is measured, not repaired.** The warp-based correction was abandoned (see step 5). The measurement itself is limited by the lighting tolerance (≈ 0.7 px on the silhouette, ≈ 2 px on internal edges), and a slide *along* an edge is invisible to it.
 
 ## Next
 

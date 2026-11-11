@@ -13,8 +13,9 @@ TWO COMPLEMENTARY MEASUREMENTS
    moved at that spot. It is an oriented "chamfer distance".
    Safeguards:
      - the AI edge must be parallel to the 3D contour (otherwise it belongs to something else);
-     - the "inside" of the AI edge must look like the bag, and the "outside" less so.
-       This rejects the edges of cast shadows on the table, often more contrasted than the bag.
+     - the "inside" of the AI edge must look like the bag (colour distance < BAG_COLOR_MAX_DIST), and
+       the "outside" less so. This rejects the edges of cast shadows on the table, often more
+       contrasted than the bag.
    It does not depend on texture: it works even on plain leather.
    Three edge types are measured:
      type 0  SILHOUETTE   contour of the object mask;
@@ -58,6 +59,12 @@ import sys
 
 import cv2
 import numpy as np
+
+# Maximum colour distance (OpenCV 8-bit Lab: L, a, b on 0-255) between the inside of an AI edge and the bag colour
+# read 5 px inside the 3D contour. Chosen on frame 30 of the original-mask video: at 45, false detections on the
+# cast shadow (cyan table / navy shadow boundary) disappear, while silhouette coverage only drops from 84 to 82 %.
+# None = previous behaviour (relative test only).
+BAG_COLOR_MAX_DIST = 45.0
 
 # ---------------------------------------------------------------------------------------------
 # Reading / writing
@@ -308,7 +315,7 @@ def crease_contours(passes, mask, other_P, min_angle=25.0, margin=3, min_size=8,
     return P.astype(np.float32), N.astype(np.float32), half.astype(np.float32)
 
 
-def analyze_edges(mask, ai_bgr, passes=None, R=12, cos_min=0.7, rel_threshold=0.25):
+def analyze_edges(mask, ai_bgr, passes=None, R=12, cos_min=0.7, rel_threshold=0.25, bag_color_max_dist="default"):
     """Edge measurement. Type 0 = silhouette (mask), type 1 = internal occlusion (depth),
     type 2 = crease (normal pass).
     The placement (global affine) is fitted on the SILHOUETTE only, so that numbers stay comparable
@@ -359,7 +366,15 @@ def analyze_edges(mask, ai_bgr, passes=None, R=12, cos_min=0.7, rel_threshold=0.
     bag = read(lab, P[:, 0] - 5 * N[:, 0], P[:, 1] - 5 * N[:, 1])[:, None]
     inside = read(lab, X - 2.5 * N[:, None, 0], Y - 2.5 * N[:, None, 1])
     outside = read(lab, X + 2.5 * N[:, None, 0], Y + 2.5 * N[:, None, 1])
-    bag_side = np.linalg.norm(inside - bag, axis=2) < np.linalg.norm(outside - bag, axis=2)
+    d_inside = np.linalg.norm(inside - bag, axis=2)
+    bag_side = d_inside < np.linalg.norm(outside - bag, axis=2)
+    # ABSOLUTE condition: the inside must LOOK LIKE the bag, not merely be less far from it than the outside.
+    # Otherwise a cyan table / navy shadow boundary passed the test (cyan is "closer" to yellow than navy):
+    # false detections on the cast shadow, and bumps in the edge correction.
+    if bag_color_max_dist == "default":
+        bag_color_max_dist = BAG_COLOR_MAX_DIST
+    if bag_color_max_dist is not None:
+        bag_side &= d_inside < bag_color_max_dist
     # Internal edge: front and back are often the same leather. If, in the AI frame, both sides have
     # almost the same colour, the inside/outside test means nothing → ignored.
     behind = read(lab, P[:, 0] + 5 * N[:, 0], P[:, 1] + 5 * N[:, 1])

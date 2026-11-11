@@ -1,9 +1,16 @@
 """
 edge_correction.py — CORRECT the bag's shape in the AI video, by pulling its edges back onto the 3D edges.
 
+STATUS: EXPERIMENT TESTED AND ABANDONED (2026-11-11). Kept for reference; see "Correcting the deformation:
+tried, then abandoned" in the README. In short: it passes its synthetic validation, but on real AI videos the
+result looks like a Photoshop Liquify brush (lumpy edges, dented strap where leather passes over leather), and
+an independent colour-based measurement shows only a 12-19 % reduction of the edge error. Use
+deformation_map.py to MEASURE the deformation, and the exact pass-2 mask to PREVENT it.
+
 PRINCIPLE
   deformation_map.py measures, for each 3D edge point, where the matching edge lies in the AI frame: an offset
-  r along the normal (after the global placement). The AI frame is warped to cancel that offset:
+  r along the normal, RAW, i.e. without the global placement (see offset_to_correct). The AI frame is warped to
+  cancel that offset:
     - "backward" field u: output pixel x fetches input pixel x + u(x) (cv2.remap);
     - at edge point P, u(P) = s · N, where s = the offset TO CORRECT: the AI edge is at P + r·N, we want it
       back at P;
@@ -24,6 +31,9 @@ PRINCIPLE
   STABILITY: while the 3D bag is still (frames --still-start to the end), each point's offset is replaced by its
   temporal median (the AI's deformation is stable over time). A single field is applied to the whole range, so
   the image does not wobble.
+
+  SMOOTHING (--smoothing, default 3 px): the correction is smoothed along each edge, since the per-point lighting
+  tolerance is noisy and would otherwise make the corrected edge jitter.
 
   SAFEGUARDS (without them, one aberrant measurement is enough to tear the image):
     1. neighbour consistency (filter_consistency): an AI deformation is SMOOTH along an edge; a point whose
@@ -59,8 +69,14 @@ import edge_confidence as ec
 
 
 def offset_to_correct(sil, conf, mode, min_vis=0.5):
-    """s per point (nan = unknown / left untouched)."""
-    r, T = sil["residual_raw"], sil["T"]
+    """s per point (nan = unknown / left untouched).
+
+    TARGET = THE 3D CONTOUR ITSELF. We correct the RAW offset d (AI edge at P + d·N), not the residual r left after
+    deformation_map's global affine placement. That placement is useful for measuring shape independently of
+    position, but it absorbs part of the real deformations (handles...) and, in compensation, creates fictitious
+    offsets on correct edges (inner strap edge: d = +0.6 px, r = -1.5 px). Correcting r created bumps there. In
+    this pipeline the video is generated from the render, so the right position is known: it is P."""
+    r, T = sil["d"], sil["T"]
     tol = np.fmax(conf["tol"], sil["band"])
     ok = sil["found"] & (conf["vis"] >= min_vis) & np.isfinite(conf["tol"]) & (T <= 1)
     if mode == "certain":
@@ -92,6 +108,44 @@ def filter_consistency(P, T, s, radius=8.0, max_dev=1.5, s_max=6.0, min_neighbou
                 keep[i] = abs(s[idx[i]] - np.median(s[idx[v]])) <= max_dev
         s[idx[~keep]] = np.nan
     return np.where(np.abs(s) <= s_max, s, np.nan)
+
+
+def smooth_along_edges(P, N, T, s, sigma=3.0, cos_min=0.5):
+    """Against jitter: after the consistency filter, two neighbouring points can still get slightly different
+    corrections (the per-point lighting tolerance jumps from 0.2 to 1.1 px between neighbours). An AI deformation is
+    smooth along an edge, so each s is replaced by the Gaussian-weighted mean (sigma px) of its neighbours: same edge
+    type, and normal pointing the same way (cos > cos_min), so that the two sides of a narrow strap are not mixed.
+    The points lie on curves, so this smooths ALONG the contour. sigma = 0: disabled."""
+    if sigma <= 0:
+        return s
+    from scipy.spatial import cKDTree
+    s_s = s.copy()
+    ok = np.isfinite(s)
+    for ty in np.unique(T):
+        idx = np.where(ok & (T == ty))[0]
+        if len(idx) < 2:
+            continue
+        tree = cKDTree(P[idx])
+        for i, v in enumerate(tree.query_ball_point(P[idx], 3 * sigma)):
+            v = np.array(v)
+            v = v[(N[idx[v]] @ N[idx[i]]) > cos_min]
+            d2 = ((P[idx[v]] - P[idx[i]]) ** 2).sum(1)
+            wts = np.exp(-d2 / (2 * sigma ** 2))
+            s_s[idx[i]] = (wts * s[idx[v]]).sum() / wts.sum()
+    return s_s
+
+
+def ripple(sil, r_max=3.0):
+    """Ripple of an edge: along the silhouette (points in contour order, every 2 px), the second difference
+    |r[i-1] - 2 r[i] + r[i+1]| of the measured offset. A straight but shifted edge gives 0; a wavy edge gives a large
+    value. Only triplets of found, consecutive points (less than r_max px apart, so on the same contour) are kept."""
+    P, r, T, f = sil["P"], sil["residual_raw"], sil["T"], sil["found"]
+    i = np.where(T == 0)[0]
+    i = i[(i >= 1) & (i < len(P) - 1)]
+    ok = (T[i - 1] == 0) & (T[i + 1] == 0) & f[i - 1] & f[i] & f[i + 1]
+    ok &= (np.linalg.norm(P[i] - P[i - 1], axis=1) < r_max) & (np.linalg.norm(P[i + 1] - P[i], axis=1) < r_max)
+    i = i[ok]
+    return np.abs(r[i - 1] - 2 * r[i] + r[i + 1])
 
 
 def anti_fold(u, min_det=0.5, attempts=8):
@@ -148,7 +202,7 @@ def measure_offsets(img, mask, passes, conf, mode):
     return sil, offset_to_correct(sil, conf, mode)
 
 
-def correct_frames(frames, masks, passes, confs, mode, still_start, correction_passes=2, sigma=4.0):
+def correct_frames(frames, masks, passes, confs, mode, still_start, correction_passes=2, sigma=4.0, smoothing=3.0):
     """Returns the corrected frames and the fields. Still range: a single field (temporal median)."""
     h, w = frames[0].shape[:2]
     n = len(frames)
@@ -168,6 +222,7 @@ def correct_frames(frames, masks, passes, confs, mode, still_start, correction_p
             if S[k] is None:
                 continue
             s = filter_consistency(sils[k]["P"], sils[k]["T"], S[k])
+            s = smooth_along_edges(sils[k]["P"], sils[k]["N"], sils[k]["T"], s, smoothing)
             u = field_from_points(sils[k]["P"], sils[k]["N"], s, h, w, sigma)
             fields[k] = anti_fold(compose_fields(fields[k], u))
     return [apply_field(frames[k], fields[k]) for k in range(n)], fields
@@ -233,7 +288,7 @@ def mode_validate(a):
                 # Validation frames only, each with its own bumps: no temporal median.
                 sel = val_frames
                 _, fl = correct_frames([video[k] for k in sel], [masks[k] for k in sel], [passes[k] for k in sel],
-                                       [confs[k] for k in sel], mode, len(sel))
+                                       [confs[k] for k in sel], mode, len(sel), smoothing=a.smoothing)
                 fields = dict(zip(sel, fl))
                 for k in val_frames:
                     # EXACT residual error: deformed image D(x) = I(x - c(x)), corrected C(x) = D(x + u(x))
@@ -272,6 +327,15 @@ def mode_validate(a):
                                 row[f"pts_{name}_{lo}-{hi}_before"] = float(bef[m].mean())
                                 row[f"pts_{name}_{lo}-{hi}_after"] = float(aft[m].mean())
                                 row[f"pts_{name}_{lo}-{hi}_n"] = int(m.sum())
+                    # EXACT ripple: residual error along the normal, at the silhouette points taken in contour order;
+                    # second difference between consecutive points (before / after correction).
+                    i0 = np.where(sr["T"] == 0)[0]
+                    Ps, Ns = sr["P"][i0], sr["N"][i0]
+                    e_n = {name: (np.stack([dm.sample_bilinear(np.ascontiguousarray(f_[..., i]), Ps[:, 0], Ps[:, 1]) for i in range(2)], 1) * Ns).sum(1)
+                           for name, f_ in (("before", -c_true), ("after", u - c_u))}
+                    cons = (np.linalg.norm(Ps[1:-1] - Ps[:-2], axis=1) < 3) & (np.linalg.norm(Ps[2:] - Ps[1:-1], axis=1) < 3)
+                    for name, e in e_n.items():
+                        row[f"ripple_sil_{name}"] = float(np.mean(np.abs(e[:-2] - 2 * e[1:-1] + e[2:])[cons]))
                     rows.append(row)
             print(f"lighting {j} bumps={with_bumps} done")
     if os.path.exists(os.path.join(a.out, "_tmp.mp4")):
@@ -280,7 +344,7 @@ def mode_validate(a):
     for b in (False, True):
         for mode in ("certain", "full"):
             L = [r for r in rows if r["bumps"] == b and r["mode"] == mode]
-            keys = sorted({c for r in L for c in r if c.startswith(("bump_", "elsewhere_", "max_displacement", "pts_"))})
+            keys = sorted({c for r in L for c in r if c.startswith(("bump_", "elsewhere_", "max_displacement", "pts_", "ripple"))})
             res[f"{'with' if b else 'without'}_bumps_{mode}"] = {
                 c: float(np.nanmean([r[c] for r in L if c in r])) for c in keys}
     with open(os.path.join(a.out, "validation.json"), "w", encoding="utf-8") as f:
@@ -295,7 +359,7 @@ def mode_correct(a):
     refs, masks, passes = dm.read_refs(a.refs, w, h)
     n = min(len(video), len(refs))
     confs = [dm.read_confidence(a.confidence, k) for k in range(n)]
-    corr, fields = correct_frames(video[:n], masks[:n], passes[:n], confs, a.mode, a.still_start)
+    corr, fields = correct_frames(video[:n], masks[:n], passes[:n], confs, a.mode, a.still_start, smoothing=a.smoothing)
     dm.write_video(os.path.join(a.out, "corrected.mp4"), corr, fps)
     side = []
     for k in range(n):
@@ -310,7 +374,13 @@ def mode_correct(a):
     dm.write_video(os.path.join(a.out, "before_after_field.mp4"), side, fps)
     np.savez_compressed(os.path.join(a.out, "fields.npz"), fields=np.stack(fields).astype(np.float16))
     amp = [float(np.linalg.norm(c, axis=2).max()) for c in fields]
-    print(json.dumps({"max_displacement_px": max(amp), "median_max_displacement_px": float(np.median(amp))}))
+    # Silhouette ripple, before / after, on the still frames (same detector: indicative only).
+    rip = {}
+    for name, imgs in (("before", video), ("after", corr)):
+        v = [ripple(s_) for k in range(a.still_start, n)
+             for s_ in [dm.analyze_edges(masks[k], imgs[k], passes[k])[1]] if s_ is not None]
+        rip[f"ripple_sil_{name}_px"] = float(np.mean(np.concatenate(v)))
+    print(json.dumps({"max_displacement_px": max(amp), "median_max_displacement_px": float(np.median(amp)), **rip}))
 
 
 def main():
@@ -328,6 +398,8 @@ def main():
         s.add_argument("--confidence", required=True)
         s.add_argument("--out", required=True)
         s.add_argument("--still-start", type=int, default=14)
+        s.add_argument("--smoothing", type=float, default=3.0,
+                       help="sigma (px) of the smoothing of the correction along the edges, against jitter (0 = none)")
     a = p.parse_args()
     mode_validate(a) if a.action == "validate" else mode_correct(a)
 
