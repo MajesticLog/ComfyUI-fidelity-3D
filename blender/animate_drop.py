@@ -79,6 +79,9 @@ def read_arguments():
     p.add_argument("--sun-strength", type=float, default=4.0)
     p.add_argument("--sun-color", default="1.0,0.95,0.88", metavar="R,G,B")
     p.add_argument("--hdri-strength", type=float, default=0.8)
+    p.add_argument("--dense-lights", action="store_true",
+                   help="lights pass: 36 suns (12 azimuths x elevations 15/35/60) + zenith + sky instead of 10 suns + sky "
+                        "(used by comp/light_estimation.py; render a single still frame with --start/--end)")
     p.add_argument("--view", default=None,
                    help="view transform of the beauty (e.g. Standard: colours not desaturated by AgX)")
     return p.parse_args(argv)
@@ -227,6 +230,9 @@ def main():
     # Basis lights: (name, azimuth, elevation) relative to the camera, plus a uniform "sky".
     BASIS_LIGHTS = [(f"s{az:03d}_{el}", az, el) for el in (30,) for az in range(0, 360, 45)] + \
                    [("s000_75", 0, 75), ("s180_75", 180, 75), ("sky", None, None)]
+    if a.dense_lights:  # the 10-sun basis is too coarse to recover an unknown light (see comp/light_estimation.py)
+        BASIS_LIGHTS = [(f"s{az:03d}_{el}", az, el) for el in (15, 35, 60) for az in range(0, 360, 30)]
+        BASIS_LIGHTS += [("s000_90", 0, 90), ("sky", None, None)]
 
     # Fixed depth range for the whole sequence (otherwise the depth would "breathe" from frame to frame).
     highest = [c + Vector((0, 0, bag_height * a.height)) for c in corners]

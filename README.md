@@ -2,7 +2,7 @@
 
 **Use generative AI on a luxury product without losing the product — and prove it with numbers.**
 
-A 3D render is used as the *ground truth*. Generative AI (Flux, Qwen Image Edit, Wan 2.2 VACE in ComfyUI) creates the set, the light and the motion. Python tools measure, zone by zone, how far the product drifted, and restore it.
+A 3D render is used as the *ground truth*. Generative AI (Flux, Qwen Image Edit, Wan 2.2 VACE in ComfyUI) creates the set, the light and the motion. Python tools measure, zone by zone, how far the product drifted, restore its texture and colour, and measure what cannot be restored (shape).
 
 > **Disclaimer.** Personal, non-commercial test project, **not affiliated with, endorsed by or connected to** the fashion house whose bag design inspired the 3D model used here. The 3D model "Lady D-Lite" is by **Roberto Domínguez** (CC-BY), the HDRI "Studio Small 09" by **Sergej Majboroda / Poly Haven** (CC0). Any trademark visible in the renders belongs to its owner.
 
@@ -73,6 +73,18 @@ Generative AI makes beautiful images, but it **quietly changes the product**: em
 
 Colour can be fixed afterwards. **Shape is harder**: is the strap 3 px wider than the real one, is a handle swelling? Because Blender drives the video, every frame has an **exact 3D reference of the same pose, seen by the same camera**. No pose estimation needed: any shape difference is a deformation invented by the AI.
 
+**In short:**
+
+| | Result |
+|---|---|
+| Measure the deformation, edge by edge, separated from lighting effects | ✅ steps 1–2 |
+| Prevent it: exact mask for the repaint pass | ✅ half as many deformed edges (step 3) |
+| Average it over time | ➖ nothing to average, the deformation is stable (step 4) |
+| Repair it with a warp | ❌ abandoned, looks like a Liquify brush (step 5) |
+| Sharpen the measurement by estimating the AI's light | ❌ partial, material differs more than light (step 6) |
+
+Two of the five are negative results, kept on purpose: knowing what does *not* work is part of the method.
+
 **1. Measure: a deformation map, frame by frame** (`comp/deformation_map.py`). Each 3D edge point looks for the matching edge in the AI frame, along its normal. Three kinds of edges are covered: the **silhouette** (object mask), **occlusion edges** where a part passes in front of another (jumps in the depth pass), and **creases** (orientation jumps in the normal pass). A global affine fit ("placement") is removed first, so that only the local deformation remains.
 
 ![Deformation map](docs/images/deformation_map.jpg)
@@ -121,6 +133,23 @@ Three bugs were found and fixed on the way, and each fix exposed the next proble
 
 **Conclusion.** Shape is **measured** after generation (`deformation_map.py`) and **prevented** before it (exact pass-2 mask: half as many deformed edges). It is not repaired with a warp. A real repair would mean re-compositing the rendered part, as in demo A, or regenerating.
 
+**6. Knowing the light: tried, partial result** (`comp/light_estimation.py`, kept for reference). The measurement is limited by light: a rounded edge moves with the light direction, hence the per-point tolerances (≈ 0.7 px on the silhouette, ≈ 2 px on internal edges). If the AI's light were known, its effect on each edge could be predicted and subtracted.
+
+Light adds up, so the AI's light can be searched as a **non-negative mix of the basis lights** (NNLS on the luminance of the leather, unknown tone curve). The undeformed bag is then re-rendered under that light, and its edges give the light-induced offset to subtract.
+
+| Median tolerance (frame 30, fake videos, unseen lightings) | No light | 11 lights, true light in the basis | 11 lights, true sun removed | **38 lights** (`--dense-lights`) |
+|---|---|---|---|---|
+| Silhouette | 0.75 px | 0.24 px | 0.79 px | **0.70 px** |
+| Internal edges | 1.99 px | 0.49 px | 1.34 px | **0.95 px** |
+
+- **It works only when the light is exactly in the basis.** In the realistic case, the true light falls between the basis suns, and the gain collapses.
+- **A denser basis recovers the light, not the edges.** With 38 lights, the luminance fit is almost ideal (4.2 % residual vs 3.6 %), yet the silhouette tolerance barely moves. Matching the light "on average" does not say where the last lit pixel of a rounded edge falls.
+- **On real AI frames, material matters more than light.** The fit residual is 10–18 %, and the "light" found is a mix of 9–10 lights compensating for the AI's different contrast, highlights and hue. The AI frame stays more beautiful and coherent than the re-render, which is fine for a measuring instrument, but this instrument is not precise enough.
+
+![Light estimation](docs/images/light_estimation.jpg)
+
+*Frame 30, exact-mask video. Left: AI. Right: the 3D bag re-rendered under the light estimated from the AI frame (38 basis lights). The light direction is plausible; the material is not the AI's.*
+
 ---
 
 ## Repository
@@ -128,7 +157,7 @@ Three bugs were found and fixed on the way, and each fix exposed the next proble
 | Path | What it does |
 |---|---|
 | `blender/export_passes.py` | Renders beauty (RGBA), depth, camera-space normals and **one mask per material** for each camera. Emission-material swap (robust to Blender 5's compositor changes). Options: `--passes depth_table` (invisible round table in the depth only, disparity encoding), `--sun` / `--bounce` (relight the beauty to match a generated set). |
-| `blender/animate_drop.py` | Drop animation with colour switch at contact: per-frame simple render, depth (fixed range), beauty, masks (object / metal / leather). Optional passes: `normal` (creases), `ids` (one value per model part, no anti-aliasing), `lights` (11 linear basis lights). Options `--sun`, `--view Standard` for sunlit, non-desaturated reference images. |
+| `blender/animate_drop.py` | Drop animation with colour switch at contact: per-frame simple render, depth (fixed range), beauty, masks (object / metal / leather). Optional passes: `normal` (creases), `ids` (one value per model part, no anti-aliasing), `lights` (11 linear basis lights; `--dense-lights`: 38). Options `--sun`, `--view Standard` for sunlit, non-desaturated reference images. |
 | `blender/flatten_simple.py`, `blender/inspect_model.py` | Helpers. |
 | `qa/fidelity_qa.py` | **Per-zone fidelity QA**: SSIM after light equalization, edge F1 (Canny, ±2 px), ΔE2000 with reference lightness. HTML report, heatmap, edge map. |
 | `qa/make_test_case.py` | Builds a known-good and a known-bad image to self-test the QA. |
@@ -141,6 +170,7 @@ Three bugs were found and fixed on the way, and each fix exposed the next proble
 | `comp/lighting_noise_test.py` | Measures the offsets caused by lighting alone (same undeformed bag, other suns). |
 | `comp/temporal_accumulation.py`, `comp/temporal_noise.py` | Temporal median over the still frames, and frame-to-frame jitter (negative result: the AI's deformation is stable). |
 | `comp/edge_correction.py` | *Abandoned experiment, kept for reference.* Warps the AI video so its edges land back on the 3D edges. `validate` (known bumps, true-field error) and `correct`. See step 5 for why it was abandoned. |
+| `comp/light_estimation.py` | *Partial / negative result, kept for reference.* Estimates the AI frame's light as a mix of basis lights and tests whether it shrinks the edge tolerances (`validate`, `estimate`). See step 6. |
 | `comp/pass2_masks.py`, `comp/vace_pass2_mask.py` | Pass 2 temporal mask with a chosen margin, and a graph that re-runs pass 2 alone on a saved pass 1. |
 | `comp/compare_measurements.py` | Side-by-side table of several deformation measurements, per model part. |
 | `workflows/` | ComfyUI workflows (UI format, plus one API-format graph). |
@@ -203,11 +233,11 @@ python comp/deformation_map.py measure --refs renders/drop --video ai.mp4 --conf
 - **Thresholds are starting values** (SSIM ≥ 0.80, F1 ≥ 0.75, ΔE ≤ 5; < 2 for a brand colour). They should be calibrated with a house, on its own approved and rejected references.
 - **1024 px only**, one product, one material family (embroidered raffia). Not yet tested: 4K, polished metal, glass, patent leather.
 - **Video is a first result**, not a finished pipeline.
-- **Shape is measured, not repaired.** The warp-based correction was abandoned (see step 5). The measurement itself is limited by the lighting tolerance (≈ 0.7 px on the silhouette, ≈ 2 px on internal edges), and a slide *along* an edge is invisible to it.
+- **Shape is measured, not repaired.** The warp-based correction was abandoned (see step 5). The measurement itself is limited by the lighting tolerance (≈ 0.7 px on the silhouette, ≈ 2 px on internal edges); estimating the AI's light from basis lights did not lower it enough (step 6). A slide *along* an edge is invisible to the measurement.
 
 ## Next
 
-- Estimate the generated set's lighting and **re-render the product in Blender** with it — exact by construction, no correction needed. Knowing the AI's light would also shrink the per-point tolerances, which are now the main limit of the deformation measurement.
+- Estimate the generated set's lighting and **re-render the product in Blender** with it — exact by construction, no correction needed. Step 6 shows the hard part: the AI's material differs from Blender's, so the light alone does not explain the image.
 - Organic transition masks ("ink in water") driven from the impact point.
 - A blind, independent evaluation (perceptual metrics, OCR of lettering, vision-language checks) to break the circularity.
 - A per-zone pass/fail report an art director can sign off.
